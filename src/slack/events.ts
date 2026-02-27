@@ -6,6 +6,7 @@ import { resolveCwd } from "../util/paths.js";
 import { detectFilePaths } from "../util/file-detect.js";
 import { downloadSlackFile, uploadFileToSlack } from "./files.js";
 import { postToThread, formatForSlack } from "./messages.js";
+import { createSlackMcpServer } from "./mcp-server.js";
 import { basename } from "node:path";
 
 /** Concurrency guard: set of thread keys currently being processed */
@@ -87,13 +88,15 @@ export async function handleMessage(
     let prompt: string;
 
     if (existing) {
-      // Aggregate unprocessed messages since last response
-      prompt = await aggregateMessages(
+      // Aggregate unprocessed messages since last response (also downloads their files)
+      const aggregated = await aggregateMessages(
         client,
         channelId,
         threadTs,
         existing.lastResponseTs,
       );
+      prompt = aggregated.text;
+      filePaths.push(...aggregated.filePaths);
     } else {
       // First message - use the current text
       const rawText = ("text" in event ? event.text : "") ?? "";
@@ -101,9 +104,12 @@ export async function handleMessage(
       prompt = rawText.replace(/<@[A-Z0-9]+>/g, "").trim();
     }
 
-    // Append file paths to prompt
+    // Append file paths to prompt — tell Claude these are local files it can read/view
     if (filePaths.length > 0) {
-      prompt += "\n\nAttached files:\n" + filePaths.map((p) => `- ${p}`).join("\n");
+      prompt +=
+        "\n\nThe user attached files to this Slack message. They have been downloaded to local disk. " +
+        "You can read/view them using their file paths:\n" +
+        filePaths.map((p) => `- ${p}`).join("\n");
     }
 
     if (!prompt.trim()) {
@@ -114,11 +120,15 @@ export async function handleMessage(
       return;
     }
 
+    // Create per-session MCP server with Slack tools bound to this thread
+    const slackMcp = createSlackMcpServer(client, channelId, threadTs);
+    const sessionOpts = { mcpServers: { "slack-tools": slackMcp } };
+
     // Call Claude
     console.log(`[${threadKey}] Sending to Claude: ${prompt.slice(0, 100)}...`);
     const response = existing
-      ? await resumeSession(prompt, cwd, existing.sessionId)
-      : await createSession(prompt, cwd);
+      ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts)
+      : await createSession(prompt, cwd, sessionOpts);
 
     // Remove thinking indicator
     if (thinkingTs) {
@@ -187,16 +197,21 @@ export async function handleMessage(
   }
 }
 
+interface AggregatedResult {
+  text: string;
+  filePaths: string[];
+}
+
 /**
  * Aggregate messages from a thread since the last bot response.
- * Returns a prompt with only the new, unprocessed user messages.
+ * Returns the prompt text and any downloaded file paths from new user messages.
  */
 async function aggregateMessages(
   client: WebClient,
   channelId: string,
   threadTs: string,
   lastResponseTs: string,
-): Promise<string> {
+): Promise<AggregatedResult> {
   const result = await client.conversations.replies({
     channel: channelId,
     ts: threadTs,
@@ -213,17 +228,39 @@ async function aggregateMessages(
     return true;
   });
 
-  // Resolve user IDs to display names
+  // Resolve user IDs to display names, and download any attached files
+  const token = process.env.SLACK_BOT_TOKEN!;
   const lines: string[] = [];
+  const filePaths: string[] = [];
+
   for (const m of userMessages) {
     const name = m.user ? await resolveUserName(client, m.user) : "unknown";
     const text = (m.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
     if (text) {
       lines.push(`${name}: ${text}`);
     }
+
+    // Download files attached to this message
+    const files = (m as { files?: Array<{ url_private_download?: string; name?: string }> }).files;
+    if (files) {
+      for (const file of files) {
+        if (file.url_private_download && file.name) {
+          try {
+            const localPath = await downloadSlackFile(
+              file.url_private_download,
+              file.name,
+              token,
+            );
+            filePaths.push(localPath);
+          } catch (err) {
+            console.error("Failed to download thread file:", err);
+          }
+        }
+      }
+    }
   }
 
-  return lines.join("\n");
+  return { text: lines.join("\n"), filePaths };
 }
 
 /** Resolve a Slack user ID to a display name, with caching */
