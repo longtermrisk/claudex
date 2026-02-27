@@ -8,6 +8,7 @@ import { downloadSlackFile, uploadFileToSlack } from "./files.js";
 import { postToThread, formatForSlack } from "./messages.js";
 import { createSlackMcpServer } from "./mcp-server.js";
 import { basename } from "node:path";
+import { transcribeAudio } from "../util/transcribe.js";
 
 /** Concurrency guard: set of thread keys currently being processed */
 const activeThreads = new Set<string>();
@@ -54,9 +55,10 @@ export async function handleMessage(
 
     // Download any attached files
     const filePaths: string[] = [];
+    const transcripts: string[] = [];
     if ("files" in event && event.files) {
       const token = process.env.SLACK_BOT_TOKEN!;
-      for (const file of event.files as Array<{ url_private_download?: string; name?: string }>) {
+      for (const file of event.files as Array<{ url_private_download?: string; name?: string; mimetype?: string }>) {
         if (file.url_private_download && file.name) {
           try {
             const localPath = await downloadSlackFile(
@@ -64,7 +66,12 @@ export async function handleMessage(
               file.name,
               token,
             );
-            filePaths.push(localPath);
+            if (file.mimetype?.startsWith("audio/")) {
+              const transcript = await transcribeAudio(localPath);
+              transcripts.push(transcript);
+            } else {
+              filePaths.push(localPath);
+            }
           } catch (err) {
             console.error("Failed to download file:", err);
           }
@@ -97,11 +104,31 @@ export async function handleMessage(
       );
       prompt = aggregated.text;
       filePaths.push(...aggregated.filePaths);
+      transcripts.push(...aggregated.transcripts);
+    } else if (threadTs !== event.ts) {
+      // Mid-thread mention with no existing session — fetch the full thread as context
+      const aggregated = await aggregateMessages(
+        client,
+        channelId,
+        threadTs,
+        "0", // from the very beginning
+      );
+      prompt = `[Slack channel: #${channelName} (${channelId})]\n\n${aggregated.text}`;
+      filePaths.push(...aggregated.filePaths);
+      transcripts.push(...aggregated.transcripts);
     } else {
-      // First message - use the current text
+      // First message (top-level) - use the current text
       const rawText = ("text" in event ? event.text : "") ?? "";
       // Strip the bot mention for @mention events
-      prompt = rawText.replace(/<@[A-Z0-9]+>/g, "").trim();
+      const messageText = rawText.replace(/<@[A-Z0-9]+>/g, "").trim();
+      prompt = `[Slack channel: #${channelName} (${channelId})]\n\n${messageText}`;
+    }
+
+    // Append audio transcripts to prompt
+    if (transcripts.length > 0) {
+      prompt +=
+        "\n\nThe user sent a voice message. Here is the transcript:\n" +
+        transcripts.map((t) => `Audio transcript: "${t}"`).join("\n");
     }
 
     // Append file paths to prompt — tell Claude these are local files it can read/view
@@ -200,6 +227,7 @@ export async function handleMessage(
 interface AggregatedResult {
   text: string;
   filePaths: string[];
+  transcripts: string[];
 }
 
 /**
@@ -218,9 +246,10 @@ async function aggregateMessages(
     oldest: lastResponseTs,
   });
 
+  const includeParent = lastResponseTs === "0";
   const userMessages = (result.messages ?? []).filter((m) => {
-    // conversations.replies always includes the parent — skip it
-    if (m.ts === threadTs) return false;
+    // conversations.replies always includes the parent — skip it unless fetching full thread
+    if (m.ts === threadTs && !includeParent) return false;
     // Skip bot messages
     if (m.bot_id) return false;
     // Skip messages at or before the last response (oldest is inclusive)
@@ -232,6 +261,7 @@ async function aggregateMessages(
   const token = process.env.SLACK_BOT_TOKEN!;
   const lines: string[] = [];
   const filePaths: string[] = [];
+  const transcripts: string[] = [];
 
   for (const m of userMessages) {
     const name = m.user ? await resolveUserName(client, m.user) : "unknown";
@@ -241,7 +271,7 @@ async function aggregateMessages(
     }
 
     // Download files attached to this message
-    const files = (m as { files?: Array<{ url_private_download?: string; name?: string }> }).files;
+    const files = (m as { files?: Array<{ url_private_download?: string; name?: string; mimetype?: string }> }).files;
     if (files) {
       for (const file of files) {
         if (file.url_private_download && file.name) {
@@ -251,7 +281,12 @@ async function aggregateMessages(
               file.name,
               token,
             );
-            filePaths.push(localPath);
+            if (file.mimetype?.startsWith("audio/")) {
+              const transcript = await transcribeAudio(localPath);
+              transcripts.push(transcript);
+            } else {
+              filePaths.push(localPath);
+            }
           } catch (err) {
             console.error("Failed to download thread file:", err);
           }
@@ -260,7 +295,7 @@ async function aggregateMessages(
     }
   }
 
-  return { text: lines.join("\n"), filePaths };
+  return { text: lines.join("\n"), filePaths, transcripts };
 }
 
 /** Resolve a Slack user ID to a display name, with caching */

@@ -3,3 +3,5 @@ dist/
 .env
 .sessions.json
 .sessions.json.tmp
+.service.pid
+logs/
