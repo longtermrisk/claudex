@@ -7,7 +7,7 @@ const { CLAUDECODE: _, ...cleanEnv } = process.env;
 const sharedOptions = {
   permissionMode: "bypassPermissions" as const,
   allowDangerouslySkipPermissions: true,
-  settingSources: ["project" as const],
+  settingSources: ["user" as const, "project" as const],
   env: cleanEnv,
   stderr: (data: string) => process.stderr.write(`[claude-code] ${data}`),
 };

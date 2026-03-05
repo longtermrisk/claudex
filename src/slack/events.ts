@@ -147,15 +147,11 @@ export async function handleMessage(
       return;
     }
 
-    // Create per-session MCP server with Slack tools bound to this thread
-    const slackMcp = createSlackMcpServer(client, channelId, threadTs);
-    const sessionOpts = { mcpServers: { "slack-tools": slackMcp } };
-
-    // Call Claude
+    // Call Claude with retry on stream failures (fresh MCP server each attempt)
     console.log(`[${threadKey}] Sending to Claude: ${prompt.slice(0, 100)}...`);
-    const response = existing
-      ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts)
-      : await createSession(prompt, cwd, sessionOpts);
+    const response = await callClaudeWithRetry(
+      client, channelId, threadTs, prompt, cwd, existing,
+    );
 
     // Remove thinking indicator
     if (thinkingTs) {
@@ -336,4 +332,32 @@ async function deleteMessage(
   } catch {
     // Best effort — may fail if message was already deleted
   }
+}
+
+/** Call Claude with automatic retry on stream/transport failures */
+async function callClaudeWithRetry(
+  client: WebClient,
+  channelId: string,
+  threadTs: string,
+  prompt: string,
+  cwd: string,
+  existing: import("../store/types.js").SessionRecord | undefined,
+  maxAttempts = 2,
+): Promise<import("../claude/response.js").ClaudeResponse> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const slackMcp = createSlackMcpServer(client, channelId, threadTs);
+      const sessionOpts = { mcpServers: { "slack-tools": slackMcp } };
+      return existing
+        ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts)
+        : await createSession(prompt, cwd, sessionOpts);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/stream closed/i.test(msg) || attempt === maxAttempts - 1) throw err;
+      console.warn(`[${channelId}:${threadTs}] Stream closed, retrying with fresh MCP server (attempt ${attempt + 2}/${maxAttempts})`);
+    }
+  }
+  throw lastErr;
 }

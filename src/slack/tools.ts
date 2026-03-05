@@ -13,6 +13,32 @@ function formatError(err: unknown): string {
   return String(err);
 }
 
+/** Retryable errors — transient connection failures from the Slack WebClient */
+function isRetryable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /stream closed|socket hang up|ECONNRESET|ETIMEDOUT/i.test(msg);
+}
+
+/** Retry an async operation with exponential backoff for transient errors */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts = 3,
+  baseDelayMs = 500,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err) || attempt === maxAttempts - 1) throw err;
+      const delay = baseDelayMs * 2 ** attempt;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr; // unreachable, satisfies TS
+}
+
 /** Cache of user ID → display name, shared across tool calls within a session */
 const userNameCache = new Map<string, string>();
 
@@ -59,11 +85,13 @@ export function slackSendMessage(ctx: SlackToolContext) {
       try {
         const channel = args.channel_id ?? ctx.channelId;
         const threadTs = args.thread_ts ?? ctx.threadTs;
-        const result = await ctx.client.chat.postMessage({
-          channel,
-          thread_ts: threadTs,
-          text: args.text,
-        });
+        const result = await withRetry(() =>
+          ctx.client.chat.postMessage({
+            channel,
+            thread_ts: threadTs,
+            text: args.text,
+          }),
+        );
         return {
           content: [{ type: "text" as const, text: `Message sent (ts: ${result.ts})` }],
         };
@@ -93,12 +121,14 @@ export function slackSendFile(ctx: SlackToolContext) {
         const threadTs = args.thread_ts ?? ctx.threadTs;
         const { basename } = await import("node:path");
         const filename = args.filename ?? basename(args.file_path);
-        await ctx.client.filesUploadV2({
-          channel_id: channel,
-          thread_ts: threadTs,
-          file: args.file_path,
-          filename,
-        });
+        await withRetry(() =>
+          ctx.client.filesUploadV2({
+            channel_id: channel,
+            thread_ts: threadTs,
+            file: args.file_path,
+            filename,
+          }),
+        );
         return {
           content: [{ type: "text" as const, text: `File "${filename}" uploaded successfully.` }],
         };
@@ -121,11 +151,13 @@ export function slackListChannels(ctx: SlackToolContext) {
     },
     async (args) => {
       try {
-        const result = await ctx.client.conversations.list({
-          types: "public_channel",
-          exclude_archived: true,
-          limit: args.limit ?? 100,
-        });
+        const result = await withRetry(() =>
+          ctx.client.conversations.list({
+            types: "public_channel",
+            exclude_archived: true,
+            limit: args.limit ?? 100,
+          }),
+        );
         const channels = (result.channels ?? []).map((ch) => ({
           id: ch.id,
           name: ch.name,
@@ -155,10 +187,12 @@ export function slackReadChannel(ctx: SlackToolContext) {
     },
     async (args) => {
       try {
-        const result = await ctx.client.conversations.history({
-          channel: args.channel_id,
-          limit: args.limit ?? 20,
-        });
+        const result = await withRetry(() =>
+          ctx.client.conversations.history({
+            channel: args.channel_id,
+            limit: args.limit ?? 20,
+          }),
+        );
         const messages = (result.messages ?? []).reverse().map((m) => ({
           ts: m.ts,
           user: m.user ?? m.bot_id ?? "unknown",
@@ -191,11 +225,13 @@ export function slackReadThread(ctx: SlackToolContext) {
     },
     async (args) => {
       try {
-        const result = await ctx.client.conversations.replies({
-          channel: args.channel_id,
-          ts: args.thread_ts,
-          limit: args.limit ?? 50,
-        });
+        const result = await withRetry(() =>
+          ctx.client.conversations.replies({
+            channel: args.channel_id,
+            ts: args.thread_ts,
+            limit: args.limit ?? 50,
+          }),
+        );
         const messages = (result.messages ?? []).map((m) => ({
           ts: m.ts,
           user: m.user ?? m.bot_id ?? "unknown",
@@ -236,12 +272,14 @@ export function slackSearch(ctx: SlackToolContext) {
           const searchQuery = args.channel_id
             ? `in:<#${args.channel_id}> ${args.query}`
             : args.query;
-          const result = await userClient.search.messages({
-            query: searchQuery,
-            count: limit,
-            sort: "timestamp",
-            sort_dir: "desc",
-          });
+          const result = await withRetry(() =>
+            userClient.search.messages({
+              query: searchQuery,
+              count: limit,
+              sort: "timestamp",
+              sort_dir: "desc",
+            }),
+          );
           const matches = (result.messages?.matches ?? []).map((m) => ({
             ts: m.ts,
             channel: (m.channel as { id?: string })?.id,
@@ -267,10 +305,13 @@ export function slackSearch(ctx: SlackToolContext) {
         }
 
         const keywords = args.query.toLowerCase().split(/\s+/);
-        const result = await ctx.client.conversations.history({
-          channel: args.channel_id,
-          limit: 200, // scan more messages to find matches
-        });
+        const channelToSearch = args.channel_id!;
+        const result = await withRetry(() =>
+          ctx.client.conversations.history({
+            channel: channelToSearch,
+            limit: 200, // scan more messages to find matches
+          }),
+        );
 
         const matches = (result.messages ?? [])
           .filter((m) => {
