@@ -13,6 +13,11 @@ export function resolveCwd(
   workspaceName: string,
   channelName: string,
 ): string {
+  // Hardcoded exception: claudex-dev channel runs in ~/
+  if (sanitize(channelName) === "claudex-dev") {
+    return BASE_DIR;
+  }
+
   const dir = join(BASE_DIR, sanitize(workspaceName), sanitize(channelName));
 
   if (!existsSync(dir)) {
