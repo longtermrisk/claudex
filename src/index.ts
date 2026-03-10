@@ -21,8 +21,8 @@ await app.start();
 console.log("⚡ Claudex is running");
 
 // Graceful shutdown on SIGTERM: notify active threads, drain, then exit.
-// manage.sh sends SIGTERM by default and waits; use `manage.sh ... --force`
-// to skip straight to SIGKILL when an immediate restart is needed.
+// Use `manage.sh slack restart --graceful` to give this handler time to run;
+// plain `restart` sends SIGTERM but only waits 5 s before escalating to SIGKILL.
 process.on("SIGTERM", async () => {
   console.log("[shutdown] SIGTERM received — starting graceful shutdown");
   try {
