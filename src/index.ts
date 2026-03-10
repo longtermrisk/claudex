@@ -1,5 +1,6 @@
 import { createApp } from "./slack/app.js";
 import { loadSessions } from "./store/sessions.js";
+import { gracefulShutdown } from "./slack/events.js";
 
 // Validate required env vars
 const required = ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "ANTHROPIC_API_KEY"];
@@ -18,3 +19,17 @@ const app = createApp();
 await app.start();
 
 console.log("⚡ Claudex is running");
+
+// Graceful shutdown on SIGTERM: notify active threads, drain, then exit.
+// manage.sh sends SIGTERM by default and waits; use `manage.sh ... --force`
+// to skip straight to SIGKILL when an immediate restart is needed.
+process.on("SIGTERM", async () => {
+  console.log("[shutdown] SIGTERM received — starting graceful shutdown");
+  try {
+    await app.stop(); // stop accepting new Slack events
+  } catch (err) {
+    console.error("[shutdown] Error stopping Bolt app:", err);
+  }
+  await gracefulShutdown(app.client);
+  process.exit(0);
+});
