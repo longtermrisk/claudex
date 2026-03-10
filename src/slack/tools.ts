@@ -8,6 +8,12 @@ export interface SlackToolContext {
   threadTs: string;
 }
 
+/**
+ * Per-thread custom inactivity timeouts, keyed by `channelId:threadTs`.
+ * Written by the set_inactivity_timeout tool; read by callClaudeWithRetry in events.ts.
+ */
+export const activeTimeouts = new Map<string, number>();
+
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -342,6 +348,32 @@ export function slackSearch(ctx: SlackToolContext) {
           isError: true,
         };
       }
+    },
+  );
+}
+
+export function setInactivityTimeout(ctx: SlackToolContext) {
+  return tool(
+    "set_inactivity_timeout",
+    `Extend (or reduce) the inactivity timeout for the current query. Call this proactively at the
+start of any task that involves long-running tool calls (shell commands, builds, training runs,
+large downloads, etc.) where the tool may produce no output for an extended period.
+The timeout controls how long to wait without any SDK message before assuming the session is
+stuck and aborting. Default is 10 minutes; use this tool when the user asks for a longer timeout
+or when you anticipate a single tool call taking more than 10 minutes.`,
+    {
+      minutes: z.number().describe("Inactivity timeout in minutes (e.g. 30 for a 30-minute timeout)"),
+    },
+    async (args) => {
+      const threadKey = `${ctx.channelId}:${ctx.threadTs}`;
+      const ms = Math.max(1, args.minutes) * 60 * 1000;
+      activeTimeouts.set(threadKey, ms);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Inactivity timeout set to ${args.minutes} minute${args.minutes === 1 ? "" : "s"} for this session.`,
+        }],
+      };
     },
   );
 }

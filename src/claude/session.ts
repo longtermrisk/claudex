@@ -23,13 +23,14 @@ export async function createSession(
   prompt: string,
   cwd: string,
   opts?: SessionOptions,
+  getTimeoutMs?: () => number,
 ): Promise<ClaudeResponse> {
   const gen = query({
     prompt,
     options: { ...sharedOptions, cwd, ...opts },
   });
 
-  return consumeResponse(gen);
+  return consumeResponse(gen, getTimeoutMs);
 }
 
 /**
@@ -40,11 +41,12 @@ export async function resumeSession(
   cwd: string,
   sessionId: string,
   opts?: SessionOptions,
+  getTimeoutMs?: () => number,
 ): Promise<ClaudeResponse> {
   const gen = query({
     prompt,
     options: { ...sharedOptions, cwd, resume: sessionId, ...opts },
   });
 
-  return consumeResponse(gen);
+  return consumeResponse(gen, getTimeoutMs);
 }

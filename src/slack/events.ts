@@ -2,6 +2,8 @@ import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
 import type { WebClient } from "@slack/web-api";
 import { getSession, saveSession } from "../store/sessions.js";
 import { createSession, resumeSession } from "../claude/session.js";
+import { DEFAULT_INACTIVITY_TIMEOUT_MS } from "../claude/response.js";
+import { activeTimeouts } from "./tools.js";
 import { resolveCwd } from "../util/paths.js";
 import { detectFilePaths } from "../util/file-detect.js";
 import { downloadSlackFile, uploadFileToSlack } from "./files.js";
@@ -217,6 +219,7 @@ export async function handleMessage(
     }
   } finally {
     activeThreads.delete(threadKey);
+    activeTimeouts.delete(threadKey);
   }
 }
 
@@ -344,14 +347,16 @@ async function callClaudeWithRetry(
   existing: import("../store/types.js").SessionRecord | undefined,
   maxAttempts = 2,
 ): Promise<import("../claude/response.js").ClaudeResponse> {
+  const threadKey = `${channelId}:${threadTs}`;
+  const getTimeoutMs = () => activeTimeouts.get(threadKey) ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const slackMcp = createSlackMcpServer(client, channelId, threadTs);
       const sessionOpts = { mcpServers: { "slack-tools": slackMcp } };
       return existing
-        ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts)
-        : await createSession(prompt, cwd, sessionOpts);
+        ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts, getTimeoutMs)
+        : await createSession(prompt, cwd, sessionOpts, getTimeoutMs);
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message : String(err);

@@ -7,6 +7,7 @@ import {
   slackReadChannel,
   slackReadThread,
   slackSearch,
+  setInactivityTimeout,
   type SlackToolContext,
 } from "./tools.js";
 
@@ -30,6 +31,7 @@ export function createSlackMcpServer(
       slackReadChannel(ctx),
       slackReadThread(ctx),
       slackSearch(ctx),
+      setInactivityTimeout(ctx),
     ],
   });
 }
