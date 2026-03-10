@@ -13,7 +13,7 @@ import { basename } from "node:path";
 import { transcribeAudio } from "../util/transcribe.js";
 
 /** Concurrency guard: set of thread keys currently being processed */
-const activeThreads = new Set<string>();
+export const activeThreads = new Set<string>();
 
 /** Cache for workspace/channel names */
 const nameCache = new Map<string, string>();
@@ -220,6 +220,46 @@ export async function handleMessage(
   } finally {
     activeThreads.delete(threadKey);
     activeTimeouts.delete(threadKey);
+  }
+}
+
+/**
+ * Gracefully shut down: notify all active threads that claudex is restarting,
+ * then wait for them to finish (up to maxWaitMs before giving up).
+ */
+export async function gracefulShutdown(
+  client: WebClient,
+  maxWaitMs = 5 * 60 * 1000,
+): Promise<void> {
+  if (activeThreads.size === 0) return;
+
+  console.log(`[shutdown] Notifying ${activeThreads.size} active thread(s) and waiting for drain...`);
+
+  // Notify all active threads
+  const notifications = [...activeThreads].map(async (threadKey) => {
+    const [channelId, threadTs] = threadKey.split(":");
+    try {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: "⚠️ claudex is restarting — your session will resume automatically on your next message.",
+      });
+    } catch (err) {
+      console.error(`[shutdown] Failed to notify thread ${threadKey}:`, err);
+    }
+  });
+  await Promise.all(notifications);
+
+  // Wait for active threads to drain
+  const deadline = Date.now() + maxWaitMs;
+  while (activeThreads.size > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  if (activeThreads.size > 0) {
+    console.warn(`[shutdown] Timed out waiting for ${activeThreads.size} thread(s) to finish — forcing exit`);
+  } else {
+    console.log("[shutdown] All threads finished, exiting cleanly");
   }
 }
 
