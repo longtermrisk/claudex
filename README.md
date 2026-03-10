@@ -16,9 +16,21 @@ Slack bot that bridges Slack conversations to Claude Code sessions. Each channel
    SLACK_SIGNING_SECRET=...
    ANTHROPIC_API_KEY=sk-ant-...
    OPENAI_API_KEY=sk-...          # for Whisper audio transcription
+
+   # Optional — enables GitHub comment mentions (see below)
+   GITHUB_TOKEN=github_pat_...
+   GITHUB_WEBHOOK_SECRET=...      # shared secret configured in your GitHub App
+   GITHUB_BOT_HANDLE=@claudex     # mention string Claude watches for (default: @claudex)
+   GITHUB_WEBHOOK_PORT=8080       # HTTP port for the webhook server (default: 8080)
    ```
 
 3. **Slack app setup** — import `slack-manifest.json` into your Slack app config. The app needs Socket Mode enabled and the scopes listed in the manifest.
+
+4. **(Optional) GitHub App setup** — to enable `@claudex` mentions in GitHub issues/PRs:
+   - Create a GitHub App (or use a fine-grained PAT) with `issues: write` permission on the target repos
+   - Add a webhook pointing at `https://your-host:8080/github/webhook`, subscribed to **Issue comments** events
+   - Set `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, and optionally `GITHUB_BOT_HANDLE` in your `.env`
+   - The HTTP server starts automatically alongside the Slack Socket Mode connection when `GITHUB_TOKEN` is present
 
 ## Running
 
@@ -52,6 +64,10 @@ npm run start
 - Attached files are downloaded to disk; audio/voice messages are transcribed via Whisper
 - Claude has MCP tools for sending messages, uploading files, listing channels, reading history, and searching Slack
 
+### GitHub channel (optional)
+
+When `GITHUB_TOKEN` is set, Claudex also starts a lightweight HTTP server that receives GitHub webhooks. Mentioning `@claudex` (or whatever `GITHUB_BOT_HANDLE` is set to) in a GitHub issue or PR comment triggers the same Claude Code session infrastructure used for Slack. Sessions are keyed by `gh:{owner/repo}#{issue_number}`, so context persists across the full issue/PR thread — the same way it does per Slack thread. Responses are posted back as GitHub comments.
+
 ## Project structure
 
 ```
@@ -64,6 +80,9 @@ src/
     messages.ts         # post messages, format mrkdwn
     mcp-server.ts       # per-session MCP server with Slack tools
     tools.ts            # Slack MCP tool definitions
+  github/
+    handler.ts          # webhook HTTP server, signature verification, session routing
+    post.ts             # post comments back to GitHub via REST API
   claude/
     session.ts          # create/resume Claude Code sessions
     response.ts         # consume streaming response
