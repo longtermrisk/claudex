@@ -1,4 +1,4 @@
-import { mkdirSync, createWriteStream } from "node:fs";
+import { mkdirSync, createWriteStream, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
@@ -47,4 +47,35 @@ export async function uploadFileToSlack(
     file: filePath,
     filename,
   });
+}
+
+/**
+ * Upload a string as a text file to a Slack thread.
+ * Writes to a temp file, uploads, then cleans up.
+ */
+export async function uploadContentAsFile(
+  client: WebClient,
+  channelId: string,
+  threadTs: string,
+  content: string,
+  filename: string,
+): Promise<void> {
+  const dir = join("/tmp", randomUUID());
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = join(dir, filename);
+  writeFileSync(tmpPath, content, "utf-8");
+  try {
+    await client.filesUploadV2({
+      channel_id: channelId,
+      thread_ts: threadTs,
+      file: tmpPath,
+      filename,
+    });
+  } finally {
+    try {
+      rmSync(dir, { recursive: true });
+    } catch {
+      // Best effort cleanup
+    }
+  }
 }
