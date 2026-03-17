@@ -1,12 +1,12 @@
 import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
 import type { WebClient } from "@slack/web-api";
 import { getSession, saveSession } from "../store/sessions.js";
-import { createSession, resumeSession } from "../claude/session.js";
+import { createSession, resumeSession, summarizeSession } from "../claude/session.js";
 import { DEFAULT_INACTIVITY_TIMEOUT_MS } from "../claude/response.js";
 import { activeTimeouts } from "./tools.js";
 import { resolveCwd } from "../util/paths.js";
 import { detectFilePaths } from "../util/file-detect.js";
-import { downloadSlackFile, uploadFileToSlack } from "./files.js";
+import { downloadSlackFile, uploadFileToSlack, uploadContentAsFile } from "./files.js";
 import { postToThread, formatForSlack } from "./messages.js";
 import { createSlackMcpServer } from "./mcp-server.js";
 import { basename } from "node:path";
@@ -168,6 +168,19 @@ export async function handleMessage(
       threadTs,
       response.text,
     );
+
+    // Notify if token-based auto-compaction fired during the session
+    if (response.didAutoCompact) {
+      try {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: ":information_source: _The context window was getting full — conversation history was automatically compacted to stay within limits._",
+        });
+      } catch {
+        // Best effort — don't let a notification failure block the session save
+      }
+    }
 
     // Detect file paths in response and upload them
     const detectedPaths = detectFilePaths(response.text);
@@ -394,9 +407,55 @@ async function callClaudeWithRetry(
     try {
       const slackMcp = createSlackMcpServer(client, channelId, threadTs);
       const sessionOpts = { mcpServers: { "slack-tools": slackMcp } };
-      return existing
+      const response = existing
         ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts, getTimeoutMs)
         : await createSession(prompt, cwd, sessionOpts, getTimeoutMs);
+
+      // Graceful recovery when the turn limit is hit:
+      //  1. Resume the session (which still has the full recent context) to generate a summary.
+      //     The summary covers both what was done and what was in progress — capturing the
+      //     "second half" of the context that auto-compaction hadn't touched yet.
+      //  2. Upload the summary as a file attachment so it's readable even if it's long.
+      //  3. Start a fresh continuation session using the summary as context, so the task
+      //     can resume without the ballooning history that caused the limit to be hit.
+      if (response.subtype === "error_max_turns" && response.sessionId) {
+        console.warn(`[${threadKey}] Turn limit reached — summarising session ${response.sessionId} and continuing`);
+        try {
+          const summaryMcp = createSlackMcpServer(client, channelId, threadTs);
+          const summary = await summarizeSession(cwd, response.sessionId, {
+            mcpServers: { "slack-tools": summaryMcp },
+          });
+
+          if (!summary.isError && summary.text) {
+            // Upload the full summary as a file (may be long)
+            await uploadContentAsFile(
+              client, channelId, threadTs, summary.text, "session-summary.txt",
+            );
+
+            // Start a fresh session using the summary as context and continue the work.
+            // This deliberately does NOT re-enter the error_max_turns recovery path —
+            // if the continuation also hits the limit the caller receives that error directly.
+            const continuationPrompt =
+              "The previous session reached the turn limit. Here is a summary of what was " +
+              "accomplished and what was left in progress:\n\n" +
+              summary.text +
+              "\n\nPlease continue from where things left off, completing the original task.";
+            const continuationMcp = createSlackMcpServer(client, channelId, threadTs);
+            const continuation = await createSession(continuationPrompt, cwd, {
+              mcpServers: { "slack-tools": continuationMcp },
+            }, getTimeoutMs);
+
+            return {
+              ...continuation,
+              costUsd: response.costUsd + summary.costUsd + continuation.costUsd,
+            };
+          }
+        } catch (summaryErr) {
+          console.error(`[${threadKey}] Failed to summarise / continue after turn limit:`, summaryErr);
+        }
+      }
+
+      return response;
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message : String(err);

@@ -32,6 +32,35 @@ Keep this file concise and organized. Use sections. Remove outdated info. This i
 
 ---
 
+## Standards for Data & Eval Work
+
+These guidelines apply globally to all data processing, analysis, and evaluation tasks.
+
+### Missing data — never substitute empty string
+When a column, field, completion, or string datapoint is absent:
+- Default to `None`, raise an error, skip the datapoint, or abort — whichever fits the context
+- If an *entire required column* is missing, raise an error — do not silently continue
+- Never coerce a missing value to `""` — it corrupts downstream analysis and hides real data gaps
+
+### Eval metrics — return NaN for failed or invalid scores
+When a judge call fails, a score cannot be produced, or the value would be meaningless:
+- Return `float('nan')` — never substitute `0`, `0.5`, or any other sentinel value
+- Report NaN counts explicitly so the caller knows how much data was affected
+- Silently imputing scores produces misleading aggregates and undermines scientific validity
+
+### Scientific rigor in experiments
+When running empirical experiments or evaluations:
+- Prioritise scientific robustness — no shortcuts on eval design, data handling, or result reporting
+- Avoid overfitting methodology to the specific setup being tested
+- Transparently surface sources of noise, missing data, and failure modes
+- The goal is insights that hold up to external scrutiny, not numbers that merely look good
+
+### Persist user-provided files immediately
+When the user shares a dataset, `.txt`, or any data file via Slack:
+- Copy it to the working directory *right away* — Slack file URLs can expire mid-session
+- Confirm the saved path in your reply before proceeding
+- Never rely solely on the original Slack-provided path for subsequent steps
+
 ## Project Notes
 
 Slack bot that bridges Slack conversations to Claude Code sessions. Each channel gets a persistent working directory and Claude Code session with full shell access and Slack MCP tools.
