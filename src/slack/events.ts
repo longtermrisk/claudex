@@ -7,6 +7,7 @@ import { activeTimeouts } from "./tools.js";
 import { resolveCwd } from "../util/paths.js";
 import { detectFilePaths } from "../util/file-detect.js";
 import { downloadSlackFile, uploadFileToSlack, uploadContentAsFile } from "./files.js";
+import { getLatestLogFile, readLastNLines } from "../util/log-reader.js";
 import { postToThread, formatForSlack } from "./messages.js";
 import { createSlackMcpServer } from "./mcp-server.js";
 import { basename } from "node:path";
@@ -229,6 +230,27 @@ export async function handleMessage(
       });
     } catch {
       // If we can't even post the error, just log it
+    }
+
+    // Upload full stack trace as a text file
+    try {
+      const stack = err instanceof Error
+        ? (err.stack ?? err.message)
+        : String(err);
+      await uploadContentAsFile(client, channelId, threadTs, stack, "error-stack.txt");
+    } catch {
+      // Best effort
+    }
+
+    // Upload last 10 000 lines of the service log as a text file
+    try {
+      const logFile = getLatestLogFile();
+      if (logFile) {
+        const logTail = readLastNLines(logFile, 10000);
+        await uploadContentAsFile(client, channelId, threadTs, logTail, "service-logs.txt");
+      }
+    } catch {
+      // Best effort
     }
   } finally {
     activeThreads.delete(threadKey);
