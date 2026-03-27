@@ -96,6 +96,8 @@ export function slackSendMessage(ctx: SlackToolContext) {
             channel,
             thread_ts: threadTs,
             text: args.text,
+            unfurl_links: false,
+            unfurl_media: false,
           }),
         );
         return {

@@ -4,6 +4,10 @@ export interface ClaudeResponse {
   sessionId: string;
   text: string;
   isError: boolean;
+  /** SDK result subtype when not 'success' — e.g. 'error_max_turns' */
+  subtype?: string;
+  /** true if token-based auto-compaction fired at least once during this session */
+  didAutoCompact?: boolean;
   costUsd: number;
 }
 
@@ -29,6 +33,7 @@ export async function consumeResponse(
 ): Promise<ClaudeResponse> {
   let sessionId = "";
   let result: SDKResultMessage | undefined;
+  let didAutoCompact = false;
 
   for await (const message of withInactivityTimeout(generator, getTimeoutMs)) {
     const msg = message as SDKMessage & { session_id?: string };
@@ -36,6 +41,11 @@ export async function consumeResponse(
     // Capture session_id from init message
     if (msg.type === "system" && "subtype" in msg && msg.subtype === "init") {
       sessionId = msg.session_id ?? "";
+    }
+
+    // Detect token-based auto-compaction (fires when context window fills up)
+    if (msg.type === "system" && "subtype" in msg && msg.subtype === "compact_boundary") {
+      didAutoCompact = true;
     }
 
     // Capture the final result
@@ -54,6 +64,7 @@ export async function consumeResponse(
       sessionId,
       text: result.result || "Done (no text output).",
       isError: false,
+      didAutoCompact,
       costUsd: result.total_cost_usd,
     };
   }
@@ -63,6 +74,8 @@ export async function consumeResponse(
     sessionId,
     text: `Error: ${result.errors?.join(", ") ?? result.subtype}`,
     isError: true,
+    subtype: result.subtype,
+    didAutoCompact,
     costUsd: result.total_cost_usd,
   };
 }
