@@ -12,6 +12,7 @@ import { postToThread, formatForSlack } from "./messages.js";
 import { createSlackMcpServer } from "./mcp-server.js";
 import { basename } from "node:path";
 import { transcribeAudio } from "../util/transcribe.js";
+import { truncateContent } from "../util/truncate.js";
 
 /** Concurrency guard: set of thread keys currently being processed */
 export const activeThreads = new Set<string>();
@@ -105,7 +106,7 @@ export async function handleMessage(
         threadTs,
         existing.lastResponseTs,
       );
-      prompt = aggregated.text;
+      prompt = truncateContent(aggregated.text, { label: "aggregated messages" });
       filePaths.push(...aggregated.filePaths);
       transcripts.push(...aggregated.transcripts);
     } else if (threadTs !== event.ts) {
@@ -116,7 +117,8 @@ export async function handleMessage(
         threadTs,
         "0", // from the very beginning
       );
-      prompt = `[Slack channel: #${channelName} (${channelId})]\n\n${aggregated.text}`;
+      const truncatedHistory = truncateContent(aggregated.text, { label: "full thread history" });
+      prompt = `[Slack channel: #${channelName} (${channelId})]\n\n${truncatedHistory}`;
       filePaths.push(...aggregated.filePaths);
       transcripts.push(...aggregated.transcripts);
     } else {

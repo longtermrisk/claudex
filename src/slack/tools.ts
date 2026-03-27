@@ -1,6 +1,7 @@
 import { z } from "zod/v4";
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import type { WebClient } from "@slack/web-api";
+import { truncateContent } from "../util/truncate.js";
 
 export interface SlackToolContext {
   client: WebClient;
@@ -209,8 +210,9 @@ export function slackReadChannel(ctx: SlackToolContext) {
           reply_count: m.reply_count,
         }));
         const resolved = await resolveMessageUsers(ctx.client, messages);
+        const raw = JSON.stringify(resolved, null, 2);
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(resolved, null, 2) }],
+          content: [{ type: "text" as const, text: truncateContent(raw, { label: "channel history" }) }],
         };
       } catch (err) {
         return {
@@ -246,8 +248,9 @@ export function slackReadThread(ctx: SlackToolContext) {
           text: m.text ?? "",
         }));
         const resolved = await resolveMessageUsers(ctx.client, messages);
+        const raw = JSON.stringify(resolved, null, 2);
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(resolved, null, 2) }],
+          content: [{ type: "text" as const, text: truncateContent(raw, { label: "thread messages" }) }],
         };
       } catch (err) {
         return {
@@ -296,8 +299,9 @@ export function slackSearch(ctx: SlackToolContext) {
             permalink: m.permalink,
           }));
           const resolved = await resolveMessageUsers(ctx.client, matches);
+          const raw = JSON.stringify(resolved, null, 2);
           return {
-            content: [{ type: "text" as const, text: JSON.stringify(resolved, null, 2) }],
+            content: [{ type: "text" as const, text: truncateContent(raw, { label: "search results" }) }],
           };
         }
 
@@ -336,12 +340,13 @@ export function slackSearch(ctx: SlackToolContext) {
           }));
 
         const resolved = await resolveMessageUsers(ctx.client, matches);
+        const raw = resolved.length > 0
+          ? JSON.stringify(resolved, null, 2)
+          : `No messages matching "${args.query}" found in recent history.`;
         return {
           content: [{
             type: "text" as const,
-            text: resolved.length > 0
-              ? JSON.stringify(resolved, null, 2)
-              : `No messages matching "${args.query}" found in recent history.`,
+            text: truncateContent(raw, { label: "search results" }),
           }],
         };
       } catch (err) {
