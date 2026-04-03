@@ -7,6 +7,8 @@ export interface SlackToolContext {
   client: WebClient;
   channelId: string;
   threadTs: string;
+  /** Collector for texts sent via slack_send_message during this turn. */
+  sentMessages?: string[];
 }
 
 /**
@@ -102,6 +104,10 @@ Defaults to the current thread. Only use channel_id or thread_ts if the user has
             unfurl_media: false,
           }),
         );
+        // Capture sent text so the harness can prepend it as context on the next turn
+        if (ctx.sentMessages) {
+          ctx.sentMessages.push(args.text);
+        }
         return {
           content: [{ type: "text" as const, text: `Message sent (ts: ${result.ts})` }],
         };

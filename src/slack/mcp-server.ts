@@ -19,8 +19,9 @@ export function createSlackMcpServer(
   client: WebClient,
   channelId: string,
   threadTs: string,
+  sentMessages?: string[],
 ) {
-  const ctx: SlackToolContext = { client, channelId, threadTs };
+  const ctx: SlackToolContext = { client, channelId, threadTs, sentMessages };
 
   return createSdkMcpServer({
     name: "slack-tools",

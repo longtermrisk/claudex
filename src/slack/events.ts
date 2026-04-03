@@ -106,18 +106,33 @@ export async function handleMessage(
         threadTs,
         existing.lastResponseTs,
       );
-      prompt = truncateContent(aggregated.text, { label: "aggregated messages" });
+      prompt = await truncateContent(aggregated.text, { label: "aggregated messages" });
+
+      // Prepend messages sent via slack_send_message in the previous turn so Claude
+      // has a compaction-proof record of what it already replied, even if the SDK
+      // session history was pruned.
+      if (existing.lastSentMessages?.length) {
+        const prevMsgs = existing.lastSentMessages
+          .map((t) => `- ${t.slice(0, 500)}`)
+          .join("\n");
+        prompt =
+          `[Messages you sent via slack_send_message in your previous reply:]\n${prevMsgs}\n\n` +
+          `[New message(s) from user:]\n${prompt}`;
+      }
+
       filePaths.push(...aggregated.filePaths);
       transcripts.push(...aggregated.transcripts);
     } else if (threadTs !== event.ts) {
-      // Mid-thread mention with no existing session — fetch the full thread as context
+      // Mid-thread mention with no existing session — fetch the full thread as context,
+      // including previous bot replies so Claude can see what was already answered.
       const aggregated = await aggregateMessages(
         client,
         channelId,
         threadTs,
         "0", // from the very beginning
+        true, // include bot messages so prior answers are visible
       );
-      const truncatedHistory = truncateContent(aggregated.text, { label: "full thread history" });
+      const truncatedHistory = await truncateContent(aggregated.text, { label: "full thread history" });
       prompt = `[Slack channel: #${channelName} (${channelId})]\n\n${truncatedHistory}`;
       filePaths.push(...aggregated.filePaths);
       transcripts.push(...aggregated.transcripts);
@@ -152,10 +167,13 @@ export async function handleMessage(
       return;
     }
 
+    // Collector for texts sent via slack_send_message during this turn
+    const sentMessages: string[] = [];
+
     // Call Claude with retry on stream failures (fresh MCP server each attempt)
     console.log(`[${threadKey}] Sending to Claude: ${prompt.slice(0, 100)}...`);
     const response = await callClaudeWithRetry(
-      client, channelId, threadTs, prompt, cwd, existing,
+      client, channelId, threadTs, prompt, cwd, existing, sentMessages,
     );
 
     // Remove thinking indicator
@@ -171,6 +189,9 @@ export async function handleMessage(
       threadTs,
       response.text,
     );
+    if (!responseTs) {
+      console.warn(`[${threadKey}] postToThread returned no timestamp — session lastResponseTs not updated`);
+    }
 
     // Notify if token-based auto-compaction fired during the session
     if (response.didAutoCompact) {
@@ -208,6 +229,7 @@ export async function handleMessage(
       sessionId: response.sessionId,
       cwd,
       lastResponseTs: responseTs,
+      lastSentMessages: sentMessages.length > 0 ? sentMessages : undefined,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -309,27 +331,37 @@ interface AggregatedResult {
 /**
  * Aggregate messages from a thread since the last bot response.
  * Returns the prompt text and any downloaded file paths from new user messages.
+ *
+ * @param includeBotMessages - When true (full-thread fetch), bot replies are included
+ *   as "Bot: …" lines so Claude can see what was already answered. When false (normal
+ *   resume), bot messages are omitted because the session context already contains them.
  */
 async function aggregateMessages(
   client: WebClient,
   channelId: string,
   threadTs: string,
   lastResponseTs: string,
+  includeBotMessages = false,
 ): Promise<AggregatedResult> {
   const result = await client.conversations.replies({
     channel: channelId,
     ts: threadTs,
-    oldest: lastResponseTs,
+    // Pass undefined rather than "" so Slack treats a missing anchor correctly.
+    oldest: lastResponseTs || undefined,
   });
 
   const includeParent = lastResponseTs === "0";
-  const userMessages = (result.messages ?? []).filter((m) => {
-    // conversations.replies always includes the parent — skip it unless fetching full thread
+  // Use numeric comparison so timestamps with different decimal precisions still
+  // compare correctly, and guard against an empty/invalid lastResponseTs.
+  const lastResponseNum = lastResponseTs ? parseFloat(lastResponseTs) : NaN;
+
+  const messages = (result.messages ?? []).filter((m) => {
+    // conversations.replies always includes the parent — skip unless full-thread fetch
     if (m.ts === threadTs && !includeParent) return false;
-    // Skip bot messages
-    if (m.bot_id) return false;
-    // Skip messages at or before the last response (oldest is inclusive)
-    if (m.ts && m.ts <= lastResponseTs) return false;
+    // Only include bot messages when explicitly requested (full-thread context rebuild)
+    if (m.bot_id && !includeBotMessages) return false;
+    // Skip messages at or before the last response (oldest param is inclusive)
+    if (m.ts && !isNaN(lastResponseNum) && parseFloat(m.ts) <= lastResponseNum) return false;
     return true;
   });
 
@@ -339,32 +371,40 @@ async function aggregateMessages(
   const filePaths: string[] = [];
   const transcripts: string[] = [];
 
-  for (const m of userMessages) {
-    const name = m.user ? await resolveUserName(client, m.user) : "unknown";
+  for (const m of messages) {
+    const isBotMessage = !!m.bot_id;
+    let name: string;
+    if (isBotMessage) {
+      name = "Bot";
+    } else {
+      name = m.user ? await resolveUserName(client, m.user) : "unknown";
+    }
     const text = (m.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
     if (text) {
       lines.push(`${name}: ${text}`);
     }
 
-    // Download files attached to this message
-    const files = (m as { files?: Array<{ url_private_download?: string; name?: string; mimetype?: string }> }).files;
-    if (files) {
-      for (const file of files) {
-        if (file.url_private_download && file.name) {
-          try {
-            const localPath = await downloadSlackFile(
-              file.url_private_download,
-              file.name,
-              token,
-            );
-            if (file.mimetype?.startsWith("audio/")) {
-              const transcript = await transcribeAudio(localPath);
-              transcripts.push(transcript);
-            } else {
-              filePaths.push(localPath);
+    // Only download files from user messages — bot files were already uploaded by us
+    if (!isBotMessage) {
+      const files = (m as { files?: Array<{ url_private_download?: string; name?: string; mimetype?: string }> }).files;
+      if (files) {
+        for (const file of files) {
+          if (file.url_private_download && file.name) {
+            try {
+              const localPath = await downloadSlackFile(
+                file.url_private_download,
+                file.name,
+                token,
+              );
+              if (file.mimetype?.startsWith("audio/")) {
+                const transcript = await transcribeAudio(localPath);
+                transcripts.push(transcript);
+              } else {
+                filePaths.push(localPath);
+              }
+            } catch (err) {
+              console.error("Failed to download thread file:", err);
             }
-          } catch (err) {
-            console.error("Failed to download thread file:", err);
           }
         }
       }
@@ -422,6 +462,7 @@ async function callClaudeWithRetry(
   prompt: string,
   cwd: string,
   existing: import("../store/types.js").SessionRecord | undefined,
+  sentMessages: string[],
   maxAttempts = 2,
 ): Promise<import("../claude/response.js").ClaudeResponse> {
   const threadKey = `${channelId}:${threadTs}`;
@@ -429,7 +470,7 @@ async function callClaudeWithRetry(
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const slackMcp = createSlackMcpServer(client, channelId, threadTs);
+      const slackMcp = createSlackMcpServer(client, channelId, threadTs, sentMessages);
       const sessionOpts = { mcpServers: { "slack-tools": slackMcp } };
       const response = existing
         ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts, getTimeoutMs)

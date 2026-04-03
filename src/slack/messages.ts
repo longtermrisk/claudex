@@ -22,7 +22,10 @@ export async function postToThread(
       thread_ts: threadTs,
       text: chunk,
     });
-    lastTs = res.ts ?? lastTs;
+    if (!res.ts) {
+      throw new Error("Slack returned no timestamp for the posted message chunk");
+    }
+    lastTs = res.ts;
   }
 
   return lastTs;

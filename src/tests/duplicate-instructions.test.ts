@@ -304,11 +304,13 @@ describe("Bug D (fixed) — slack_send_message tool result echoes sent content",
     expect(toolResults.join("\n")).toContain("A=1");
   });
 
-  it("CLAUDE.md instructs Claude not to re-answer questions already in tool history", async () => {
+  it("CLAUDE.md instructs Claude to use response.text as the default communication channel", async () => {
     const { readFileSync } = await import("node:fs");
     const claudeMd = readFileSync("/Users/claude/slack/CLAUDE.md", "utf-8");
-    expect(claudeMd).toMatch(/tool history/i);
-    expect(claudeMd).toMatch(/do not re-answer/i);
+    // D2 fix: strong guideline to prefer response.text over slack_send_message
+    expect(claudeMd).toMatch(/response\.text/i);
+    expect(claudeMd).toMatch(/one message per round/i);
+    expect(claudeMd).toMatch(/truly required/i);
   });
 });
 
