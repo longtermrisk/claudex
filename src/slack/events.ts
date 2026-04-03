@@ -104,9 +104,25 @@ export async function handleMessage(
         threadTs,
         existing.lastResponseTs,
       );
-      prompt = aggregated.text;
       filePaths.push(...aggregated.filePaths);
       transcripts.push(...aggregated.transcripts);
+
+      // Bug D1 fix: if ClaudeX sent messages via slack_send_message last round,
+      // prepend them so it knows what it already told the user even after
+      // auto-compaction (which summarises tool-call arguments and can erase the
+      // content of those messages from the session history).
+      if (existing.lastSentMessages && existing.lastSentMessages.length > 0) {
+        const prefix = existing.lastSentMessages
+          .map((msg, i) =>
+            existing.lastSentMessages!.length === 1
+              ? `[Message you sent to the user last round:]\n${msg}`
+              : `[Message ${i + 1} you sent to the user last round:]\n${msg}`,
+          )
+          .join("\n\n");
+        prompt = `${prefix}\n\n[New message(s) from user:]\n${aggregated.text}`;
+      } else {
+        prompt = aggregated.text;
+      }
     } else if (threadTs !== event.ts) {
       // Mid-thread mention with no existing session — fetch the full thread as context
       const aggregated = await aggregateMessages(
@@ -149,10 +165,13 @@ export async function handleMessage(
       return;
     }
 
-    // Call Claude with retry on stream failures (fresh MCP server each attempt)
+    // Call Claude with retry on stream failures (fresh MCP server each attempt).
+    // sentMessages accumulates the text of every slack_send_message call made
+    // to the current thread during this round — used to remind ClaudeX next turn.
+    const sentMessages: string[] = [];
     console.log(`[${threadKey}] Sending to Claude: ${prompt.slice(0, 100)}...`);
     const response = await callClaudeWithRetry(
-      client, channelId, threadTs, prompt, cwd, existing,
+      client, channelId, threadTs, prompt, cwd, existing, sentMessages,
     );
 
     // Remove thinking indicator
@@ -185,13 +204,28 @@ export async function handleMessage(
       }
     }
 
-    // Save session
+    // Bug A fix: postToThread returns "" when Slack returns no ts (e.g. the
+    // response text is empty and no chunks were posted, or a transient Slack
+    // API hiccup leaves res.ts undefined).  Saving "" as lastResponseTs causes
+    // aggregateMessages on the next turn to pass `oldest: ""` to the Slack API,
+    // which returns the *entire* thread history — so all old user messages get
+    // re-injected into the prompt and ClaudeX re-processes instructions it
+    // already handled.
+    //
+    // Fix: fall back to the incoming message's ts so the next turn only fetches
+    // messages newer than the one we just processed.  This is always safe because
+    // the current message has already been handled and we never want to see it again.
+    const safeResponseTs = responseTs || ("ts" in event ? event.ts : threadTs);
+
+    // Save session — store any slack_send_message texts from this round so
+    // the next turn can prepend them to the prompt (Bug D1 fix).
     saveSession({
       threadTs,
       channelId,
       sessionId: response.sessionId,
       cwd,
-      lastResponseTs: responseTs,
+      lastResponseTs: safeResponseTs,
+      lastSentMessages: sentMessages.length > 0 ? sentMessages : undefined,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -385,6 +419,7 @@ async function callClaudeWithRetry(
   prompt: string,
   cwd: string,
   existing: import("../store/types.js").SessionRecord | undefined,
+  sentMessages: string[],
   maxAttempts = 2,
 ): Promise<import("../claude/response.js").ClaudeResponse> {
   const threadKey = `${channelId}:${threadTs}`;
@@ -392,7 +427,9 @@ async function callClaudeWithRetry(
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const slackMcp = createSlackMcpServer(client, channelId, threadTs);
+      // Pass the shared sentMessages array so slack_send_message calls from
+      // all attempts are captured in one place.
+      const slackMcp = createSlackMcpServer(client, channelId, threadTs, sentMessages);
       const sessionOpts = { mcpServers: { "slack-tools": slackMcp } };
       return existing
         ? await resumeSession(prompt, cwd, existing.sessionId, sessionOpts, getTimeoutMs)

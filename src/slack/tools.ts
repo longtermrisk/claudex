@@ -78,7 +78,7 @@ async function resolveMessageUsers<T extends { user: string }>(
   }));
 }
 
-export function slackSendMessage(ctx: SlackToolContext) {
+export function slackSendMessage(ctx: SlackToolContext, sentMessages?: string[]) {
   return tool(
     "slack_send_message",
     "Send a message to a Slack channel or thread. Defaults to the current thread if channel_id and thread_ts are not provided.",
@@ -98,6 +98,11 @@ export function slackSendMessage(ctx: SlackToolContext) {
             text: args.text,
           }),
         );
+        // Track messages sent to the current thread so the next round can
+        // remind ClaudeX of what it told the user (survives auto-compaction).
+        if (sentMessages && channel === ctx.channelId && threadTs === ctx.threadTs) {
+          sentMessages.push(args.text);
+        }
         return {
           content: [{ type: "text" as const, text: `Message sent (ts: ${result.ts})` }],
         };

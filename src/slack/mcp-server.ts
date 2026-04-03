@@ -14,18 +14,23 @@ import {
 /**
  * Create an in-process MCP server with Slack tools bound to a specific thread context.
  * Each query() call should get a fresh server so the tools default to the right channel/thread.
+ *
+ * @param sentMessages - Optional shared array that accumulates the text of every
+ *   slack_send_message call directed at the current thread. Pass the same array
+ *   across retries so all messages from a single round are captured.
  */
 export function createSlackMcpServer(
   client: WebClient,
   channelId: string,
   threadTs: string,
+  sentMessages?: string[],
 ) {
   const ctx: SlackToolContext = { client, channelId, threadTs };
 
   return createSdkMcpServer({
     name: "slack-tools",
     tools: [
-      slackSendMessage(ctx),
+      slackSendMessage(ctx, sentMessages),
       slackSendFile(ctx),
       slackListChannels(ctx),
       slackReadChannel(ctx),
