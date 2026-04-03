@@ -82,11 +82,12 @@ async function resolveMessageUsers<T extends { user: string }>(
 export function slackSendMessage(ctx: SlackToolContext) {
   return tool(
     "slack_send_message",
-    "Send a message to a Slack channel or thread. Defaults to the current thread if channel_id and thread_ts are not provided.",
+    `Send a message to a Slack channel or thread.
+Defaults to the current thread. Only use channel_id or thread_ts if the user has explicitly asked to post in a different channel or thread — never infer or choose an alternate destination on your own.`,
     {
       text: z.string().describe("The message text to send (supports Slack mrkdwn)"),
-      channel_id: z.optional(z.string().describe("Channel ID to send to (defaults to current channel)")),
-      thread_ts: z.optional(z.string().describe("Thread timestamp to reply in (defaults to current thread)")),
+      channel_id: z.optional(z.string().describe("Channel ID to send to. Only set this if the user explicitly requested posting to a different channel.")),
+      thread_ts: z.optional(z.string().describe("Thread timestamp to reply in. Only set this if the user explicitly requested posting to a different thread.")),
     },
     async (args) => {
       try {
@@ -117,12 +118,13 @@ export function slackSendMessage(ctx: SlackToolContext) {
 export function slackSendFile(ctx: SlackToolContext) {
   return tool(
     "slack_send_file",
-    "Upload a file to a Slack channel or thread. Defaults to the current thread if channel_id and thread_ts are not provided.",
+    `Upload a file to a Slack channel or thread.
+Defaults to the current thread. Only use channel_id or thread_ts if the user has explicitly asked to upload to a different channel or thread — never infer or choose an alternate destination on your own.`,
     {
       file_path: z.string().describe("Absolute path to the file to upload"),
       filename: z.optional(z.string().describe("Display filename (defaults to basename of file_path)")),
-      channel_id: z.optional(z.string().describe("Channel ID to upload to (defaults to current channel)")),
-      thread_ts: z.optional(z.string().describe("Thread timestamp (defaults to current thread)")),
+      channel_id: z.optional(z.string().describe("Channel ID to upload to. Only set this if the user explicitly requested posting to a different channel.")),
+      thread_ts: z.optional(z.string().describe("Thread timestamp. Only set this if the user explicitly requested posting to a different thread.")),
     },
     async (args) => {
       try {
@@ -212,7 +214,7 @@ export function slackReadChannel(ctx: SlackToolContext) {
         const resolved = await resolveMessageUsers(ctx.client, messages);
         const raw = JSON.stringify(resolved, null, 2);
         return {
-          content: [{ type: "text" as const, text: truncateContent(raw, { label: "channel history" }) }],
+          content: [{ type: "text" as const, text: await truncateContent(raw, { label: "channel history" }) }],
         };
       } catch (err) {
         return {
@@ -250,7 +252,7 @@ export function slackReadThread(ctx: SlackToolContext) {
         const resolved = await resolveMessageUsers(ctx.client, messages);
         const raw = JSON.stringify(resolved, null, 2);
         return {
-          content: [{ type: "text" as const, text: truncateContent(raw, { label: "thread messages" }) }],
+          content: [{ type: "text" as const, text: await truncateContent(raw, { label: "thread messages" }) }],
         };
       } catch (err) {
         return {
@@ -301,7 +303,7 @@ export function slackSearch(ctx: SlackToolContext) {
           const resolved = await resolveMessageUsers(ctx.client, matches);
           const raw = JSON.stringify(resolved, null, 2);
           return {
-            content: [{ type: "text" as const, text: truncateContent(raw, { label: "search results" }) }],
+            content: [{ type: "text" as const, text: await truncateContent(raw, { label: "search results" }) }],
           };
         }
 
@@ -346,7 +348,7 @@ export function slackSearch(ctx: SlackToolContext) {
         return {
           content: [{
             type: "text" as const,
-            text: truncateContent(raw, { label: "search results" }),
+            text: await truncateContent(raw, { label: "search results" }),
           }],
         };
       } catch (err) {

@@ -11,7 +11,7 @@ const { CLAUDECODE: _, ...cleanEnv } = process.env;
  * a Slack reply is ever sent.  Configurable via CLAUDE_MAX_TURNS env var.
  */
 export const DEFAULT_MAX_TURNS =
-  parseInt(process.env.CLAUDE_MAX_TURNS ?? "") || 200;
+  parseInt(process.env.CLAUDE_MAX_TURNS ?? "") || 500;
 
 const sharedOptions = {
   permissionMode: "bypassPermissions" as const,
