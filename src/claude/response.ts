@@ -9,6 +9,16 @@ export interface ClaudeResponse {
   /** true if token-based auto-compaction fired at least once during this session */
   didAutoCompact?: boolean;
   costUsd: number;
+  /**
+   * Input tokens from the primary model's usage at end of session.
+   * This is the cumulative input tokens across all turns (billing metric).
+   * Combined with contextWindowSize, gives a sense of context utilisation.
+   */
+  contextTokens?: number;
+  /** The primary model's maximum context window capacity (e.g. 200 000). */
+  contextWindowSize?: number;
+  /** Token count in context just before auto-compaction fired (from compact_boundary). */
+  compactionPreTokens?: number;
 }
 
 /**
@@ -34,6 +44,7 @@ export async function consumeResponse(
   let sessionId = "";
   let result: SDKResultMessage | undefined;
   let didAutoCompact = false;
+  let compactionPreTokens: number | undefined;
 
   for await (const message of withInactivityTimeout(generator, getTimeoutMs)) {
     const msg = message as SDKMessage & { session_id?: string };
@@ -46,6 +57,10 @@ export async function consumeResponse(
     // Detect token-based auto-compaction (fires when context window fills up)
     if (msg.type === "system" && "subtype" in msg && msg.subtype === "compact_boundary") {
       didAutoCompact = true;
+      const meta = (msg as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
+      if (meta?.pre_tokens != null) {
+        compactionPreTokens = meta.pre_tokens;
+      }
     }
 
     // Capture the final result
@@ -59,6 +74,20 @@ export async function consumeResponse(
     return { sessionId, text: "No response received from Claude.", isError: true, costUsd: 0 };
   }
 
+  // Extract context window usage from per-model usage stats
+  let contextTokens: number | undefined;
+  let contextWindowSize: number | undefined;
+  const modelUsage = (result as unknown as { modelUsage?: Record<string, { inputTokens: number; contextWindow: number }> }).modelUsage;
+  if (modelUsage) {
+    const entries = Object.values(modelUsage);
+    if (entries.length > 0) {
+      // Pick the model with the most input tokens (primary model)
+      const primary = entries.reduce((a, b) => a.inputTokens > b.inputTokens ? a : b);
+      contextTokens = primary.inputTokens;
+      contextWindowSize = primary.contextWindow;
+    }
+  }
+
   if (result.subtype === "success") {
     return {
       sessionId,
@@ -66,6 +95,9 @@ export async function consumeResponse(
       isError: false,
       didAutoCompact,
       costUsd: result.total_cost_usd,
+      contextTokens,
+      contextWindowSize,
+      compactionPreTokens,
     };
   }
 
@@ -77,6 +109,9 @@ export async function consumeResponse(
     subtype: result.subtype,
     didAutoCompact,
     costUsd: result.total_cost_usd,
+    contextTokens,
+    contextWindowSize,
+    compactionPreTokens,
   };
 }
 
